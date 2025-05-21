@@ -1,1 +1,5 @@
+sql/queries
 out
+connection_string.txt
+sqlc.yaml
+.env

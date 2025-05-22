@@ -129,6 +129,49 @@ func (ac *apiConfig) createChirpEndpoint(w http.ResponseWriter, req *http.Reques
 	respondWithJson(w, 201, Chirp(newChirp))
 }
 
+func (ac *apiConfig) getChirpEndpoint(w http.ResponseWriter, req *http.Request) {
+	chirpIDString := req.PathValue("chirpID")
+	if chirpIDString == "" {
+		respondWithNotFound(w)
+		return
+	}
+
+	var chirpID uuid.UUID
+	chirpID.UnmarshalText([]byte(chirpIDString))
+
+	dbChirp, err := ac.dbQueries.GetChirp(
+		context.Background(),
+		chirpID,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			respondWithNotFound(w)
+			return
+		}
+		fmt.Printf("Error getting chirp by ID: %s\n", err)
+		w.WriteHeader(500)
+		return
+	}
+
+	respondWithJson(w, 200, Chirp(dbChirp))
+}
+
+func (ac *apiConfig) getAllChirpsEndpoint(w http.ResponseWriter, req *http.Request) {
+	dbChirps, err := ac.dbQueries.GetAllChirps(context.Background())
+	if err != nil {
+		fmt.Printf("Error getting chirps: %s\n", err)
+		w.WriteHeader(500)
+		return
+	}
+
+	var chirpyChirps []Chirp
+	for _, dbChirp := range dbChirps {
+		chirpyChirps = append(chirpyChirps, Chirp(dbChirp))
+	}
+
+	respondWithJson(w, 200, chirpyChirps)
+}
+
 func (ac *apiConfig) metricsEndpoint(w http.ResponseWriter, req *http.Request) {
 	w.Header().Add("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(200)
@@ -196,6 +239,10 @@ func main() {
 
 	mux.HandleFunc("GET /api/healthz", readinessEndpoint)
 
+	mux.HandleFunc("GET /api/chirps", apiCfg.getAllChirpsEndpoint)
+
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirpEndpoint)
+
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirpEndpoint)
 
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsEndpoint)
@@ -221,6 +268,11 @@ func readinessEndpoint(w http.ResponseWriter, req *http.Request) {
 	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(200)
 	w.Write([]byte("OK"))
+}
+
+func respondWithNotFound(w http.ResponseWriter) {
+	w.WriteHeader(404)
+	w.Write([]byte("Not Found"))
 }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {

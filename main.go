@@ -39,17 +39,26 @@ type Chirp struct {
 	UserID    uuid.UUID `json:"user_id"`
 }
 
+type RefreshToken struct {
+	Token     string       `json:"token"`
+	CreatedAt time.Time    `json:"created_at"`
+	UpdatedAt time.Time    `json:"updated_at"`
+	UserID    uuid.UUID    `json:"user_id"`
+	ExpiresAt time.Time    `json:"expires_at"`
+	RevokedAt sql.NullTime `json:"revoked_at"`
+}
+
 type apiConfig struct {
-	fileserverHits       atomic.Int32
-	charLimit            atomic.Int32
-	profaneWords         []string
-	censorStr            string
-	dbQueries            *database.Queries
-	platform             string
-	secretKey            string
-	defaultJWTExpiration time.Duration
-	maxJWTExpiration     time.Duration
-	mu                   sync.RWMutex
+	fileserverHits atomic.Int32
+	charLimit      atomic.Int32
+	profaneWords   []string
+	censorStr      string
+	dbQueries      *database.Queries
+	platform       string
+	secretKey      string
+	jwtExpiration  time.Duration
+	rtExpiration   time.Duration
+	mu             sync.RWMutex
 }
 
 func (ac *apiConfig) createUserEndpoint(w http.ResponseWriter, req *http.Request) {
@@ -117,9 +126,8 @@ func (ac *apiConfig) createUserEndpoint(w http.ResponseWriter, req *http.Request
 
 func (ac *apiConfig) loginEndpoint(w http.ResponseWriter, req *http.Request) {
 	type reqVals struct {
-		Email            string `json:"email"`
-		Password         string `json:"password"`
-		ExpiresInSeconds int    `json:"expires_in_seconds"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	var rv reqVals
@@ -145,32 +153,122 @@ func (ac *apiConfig) loginEndpoint(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	expiresIn := ac.defaultJWTExpiration
-	if rv.ExpiresInSeconds > 0 {
-		expiresIn = min(
-			time.Second*time.Duration(rv.ExpiresInSeconds),
-			ac.maxJWTExpiration,
-		)
-	}
-
-	token, err := auth.MakeJWT(dbUser.ID, ac.secretKey, expiresIn)
+	jwToken, err := auth.MakeJWT(dbUser.ID, ac.secretKey, ac.jwtExpiration)
 	if err != nil {
 		fmt.Printf("Error making JWT for login: %s\n", err)
 		w.WriteHeader(500)
 		return
 	}
 
+	rToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		fmt.Printf("Error making refresh token for login: %s\n", err)
+		w.WriteHeader(500)
+		return
+	}
+
+	_, err = ac.dbQueries.CreateRefreshToken(
+		context.Background(),
+		database.CreateRefreshTokenParams{
+			Token:     rToken,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+			UserID:    dbUser.ID,
+			ExpiresAt: time.Now().Add(ac.rtExpiration),
+		},
+	)
+	if err != nil {
+		fmt.Printf("Error inserting refresh token into database for login: %s\n", err)
+		w.WriteHeader(500)
+		return
+	}
+
+	type resVals struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+		JWToken   string    `json:"token"`
+		RToken    string    `json:"refresh_token"`
+	}
+
 	respondWithJson(
 		w,
 		200,
-		ChirpyUser{
+		resVals{
 			ID:        dbUser.ID,
 			CreatedAt: dbUser.CreatedAt,
 			UpdatedAt: dbUser.UpdatedAt,
 			Email:     dbUser.Email,
-			Token:     token,
+			JWToken:   jwToken,
+			RToken:    rToken,
 		},
 	)
+}
+
+func (ac *apiConfig) refreshEndpoint(w http.ResponseWriter, req *http.Request) {
+	tokenString, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		fmt.Printf("Error getting Authorization header token: %s\n", err)
+		w.WriteHeader(500)
+		return
+	}
+
+	rToken, err := ac.dbQueries.GetRefreshToken(context.Background(), tokenString)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			w.WriteHeader(401)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+
+		fmt.Printf("Error getting refresh token for refresh: %s\n", err)
+		w.WriteHeader(500)
+		return
+	}
+
+	if rToken.ExpiresAt.Before(time.Now()) || rToken.RevokedAt.Valid {
+		w.WriteHeader(401)
+		w.Write([]byte("Unauthorized"))
+		return
+	}
+
+	jwToken, err := auth.MakeJWT(rToken.UserID, ac.secretKey, ac.jwtExpiration)
+	if err != nil {
+		fmt.Printf("Error making JWT for refresh: %s\n", err)
+		w.WriteHeader(500)
+		return
+	}
+
+	type resVals struct {
+		Token string `json:"token"`
+	}
+
+	respondWithJson(w, 200, resVals{Token: jwToken})
+}
+
+func (ac *apiConfig) revokeEndpoint(w http.ResponseWriter, req *http.Request) {
+	tokenString, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		fmt.Printf("Error getting Authorization header token: %s\n", err)
+		w.WriteHeader(500)
+		return
+	}
+
+	err = ac.dbQueries.RevokeRefreshToken(
+		context.Background(),
+		database.RevokeRefreshTokenParams{
+			Token:     tokenString,
+			UpdatedAt: time.Now(),
+		},
+	)
+	if err != nil {
+		fmt.Printf("Error revoking refresh token: %s\n", err)
+		w.WriteHeader(500)
+		return
+	}
+
+	w.WriteHeader(204)
 }
 
 func (ac *apiConfig) createChirpEndpoint(w http.ResponseWriter, req *http.Request) {
@@ -331,8 +429,8 @@ func main() {
 	apiCfg.dbQueries = database.New(db)
 	apiCfg.platform = os.Getenv("PLATFORM")
 	apiCfg.secretKey = os.Getenv("SECRET")
-	apiCfg.defaultJWTExpiration = time.Hour
-	apiCfg.maxJWTExpiration = time.Hour
+	apiCfg.jwtExpiration = time.Hour
+	apiCfg.rtExpiration = time.Hour * 24 * 60
 
 	mux := http.NewServeMux()
 	server := http.Server{
@@ -355,6 +453,10 @@ func main() {
 	mux.HandleFunc("POST /api/users", apiCfg.createUserEndpoint)
 
 	mux.HandleFunc("POST /api/login", apiCfg.loginEndpoint)
+
+	mux.HandleFunc("POST /api/refresh", apiCfg.refreshEndpoint)
+
+	mux.HandleFunc("POST /api/revoke", apiCfg.revokeEndpoint)
 
 	mux.Handle(
 		"/app/",

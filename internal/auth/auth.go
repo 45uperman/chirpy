@@ -69,18 +69,18 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 	return id, nil
 }
 
-func GetBearerToken(headers http.Header) (string, error) {
+func GetAuthHeader(headers http.Header, prefix string) (string, error) {
 	authHeader := headers.Get("Authorization")
 	if authHeader == "" {
 		return "", fmt.Errorf("no authorization header")
 	}
 
-	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-	if tokenString == authHeader || tokenString == "" {
+	headerVal := strings.TrimPrefix(authHeader, prefix+" ")
+	if headerVal == authHeader || headerVal == "" {
 		return "", fmt.Errorf("malformed authorization header '%s'", authHeader)
 	}
 
-	return tokenString, nil
+	return headerVal, nil
 }
 
 func MakeRefreshToken() (string, error) {

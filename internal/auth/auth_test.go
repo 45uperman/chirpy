@@ -88,7 +88,7 @@ func TestGetBearer(t *testing.T) {
 
 	h4 := http.Header{}
 
-	tokenString, err := GetBearerToken(h1)
+	tokenString, err := GetAuthHeader(h1, "Bearer")
 	if err != nil {
 		fmt.Println(err)
 		t.FailNow()
@@ -99,19 +99,19 @@ func TestGetBearer(t *testing.T) {
 		t.FailNow()
 	}
 
-	_, err = GetBearerToken(h2)
+	_, err = GetAuthHeader(h2, "Bearer")
 	if err == nil {
 		fmt.Println("GetBearer failed to throw error when given Authorization header with no 'Bearer ' prefix")
 		t.FailNow()
 	}
 
-	_, err = GetBearerToken(h3)
+	_, err = GetAuthHeader(h3, "Bearer")
 	if err == nil {
 		fmt.Println("GetBearer failed to throw error when given empty Authorization header")
 		t.FailNow()
 	}
 
-	_, err = GetBearerToken(h4)
+	_, err = GetAuthHeader(h4, "Bearer")
 	if err == nil {
 		fmt.Println("GetBearer failed to throw error when given no headers")
 		t.FailNow()
